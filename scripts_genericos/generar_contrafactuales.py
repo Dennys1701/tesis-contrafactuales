@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # scripts_genericos/generar_contrafactuales.py
 # Soporte para categóricas, guarda parámetros de ejecución en JSON
+# MODIFICADO: soporte para versionado con --exp_id
 
 import argparse
 import sys
@@ -15,35 +16,110 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from cogs.evolution import Evolution
 from cogs.fitness import gower_fitness_function
 
-def load_dataset_and_model(dataset_name):
-    base = os.path.join('experimentos', dataset_name)
-    data_dir = os.path.join(base, 'datos')
-    csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
-    processed = [f for f in csv_files if 'procesado' in f.lower()]
-    data_path = os.path.join(data_dir, (processed[0] if processed else csv_files[0]))
+# -------------------------------------------------------------------
+# FUNCIÓN PRINCIPAL PARA GENERAR UN CONTRAFACTUAL USANDO CoGS
+# -------------------------------------------------------------------
+def generar_contrafactual(x_orig, target_class, blackbox, feature_intervals,
+                          categorical_indices, pop_size, n_gen):
+    """
+    Genera un contrafactual que cambia la clase de blackbox (MLP) a target_class.
+    
+    Parámetros:
+    - x_orig: array 1D, instancia original (escalada y codificada)
+    - target_class: int, clase deseada para el contrafactual
+    - blackbox: modelo MLP (con método predict)
+    - feature_intervals: lista de intervalos (min, max) para numéricas, o lista de valores para categóricas
+    - categorical_indices: lista de índices de características categóricas
+    - pop_size: tamaño de la población
+    - n_gen: número de generaciones
+    
+    Retorna:
+    - array 1D con el contrafactual, o None si no se encuentra.
+    """
+    fitness_kwargs = {
+        'blackbox': blackbox,
+        'desired_class': target_class,
+        'apply_fixes': False
+    }
+    
+    evol = Evolution(
+        x=x_orig,
+        fitness_function=gower_fitness_function,
+        fitness_function_kwargs=fitness_kwargs,
+        feature_intervals=feature_intervals,
+        indices_categorical_features=categorical_indices,
+        plausibility_constraints=None,
+        evolution_type='classic',
+        population_size=pop_size,
+        n_generations=n_gen,
+        mutation_probability='inv_mutable_genotype_length',
+        num_features_mutation_strength=0.25,
+        num_features_mutation_strength_decay=None,
+        num_features_mutation_strength_decay_generations=None,
+        init_temperature=0.8,
+        selection_name='tournament_2',
+        noisy_evaluations=False,
+        verbose=False
+    )
+    
+    evol.run()
+    best = evol.elite
+    if best is None:
+        return None
+    
+    pred = blackbox.predict([best])[0]
+    if pred != target_class:
+        return None
+    return best
 
-    mlp_path = os.path.join(base, 'modelos', f'mlp_{dataset_name}_limpio.pkl')
-    trepan_path = os.path.join(base, 'modelos', f'trepan_{dataset_name}.pkl')
-    trepan_rel_path = os.path.join(base, 'modelos', f'trepan_reloaded_{dataset_name}.pkl')
+# -------------------------------------------------------------------
+# CARGA DE DATOS Y MODELOS (con preprocesamiento coherente y soporte versionado)
+# -------------------------------------------------------------------
+def load_dataset_and_model(dataset_name, exp_id=""):
+    # Base de datos original (sin versionar) para los CSV
+    original_base = os.path.join('experimentos', dataset_name)
+    data_dir = os.path.join(original_base, 'datos')
+    csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+    data_path = os.path.join(data_dir, csv_files[0])
+
+    # Determinar directorio de modelos (versionado o no)
+    if exp_id:
+        models_dir = os.path.join('experimentos', dataset_name, exp_id, 'modelos')
+    else:
+        models_dir = os.path.join(original_base, 'modelos')
+    
+    # Rutas de los modelos (primero en versionado, luego fallback)
+    mlp_path = os.path.join(models_dir, f'mlp_{dataset_name}_limpio.pkl')
+    trepan_path = os.path.join(models_dir, f'trepan_{dataset_name}.pkl')
+    trepan_rel_path = os.path.join(models_dir, f'trepan_reloaded_{dataset_name}.pkl')
+    
+    # Fallback a la carpeta base si no existen en la versionada
+    if not os.path.exists(mlp_path):
+        mlp_path = os.path.join(original_base, 'modelos', f'mlp_{dataset_name}_limpio.pkl')
+    if not os.path.exists(trepan_path):
+        trepan_path = os.path.join(original_base, 'modelos', f'trepan_{dataset_name}.pkl')
+    if not os.path.exists(trepan_rel_path):
+        trepan_rel_path = os.path.join(original_base, 'modelos', f'trepan_reloaded_{dataset_name}.pkl')
 
     df = pd.read_csv(data_path)
-    X_raw = df.iloc[:, :-1].values
+    X_raw = df.iloc[:, :-1].values.copy()
     y_raw = df.iloc[:, -1].values
 
     mlp_data = joblib.load(mlp_path)
     mlp_model = mlp_data['model']
     label_encoder = mlp_data.get('label_encoder')
-    scaler = mlp_data.get('metadata', {}).get('scaler', None)
+    scaler = mlp_data.get('scaler')
+    feature_encoders = mlp_data.get('feature_encoders', {})
 
-    meta_files = [f for f in os.listdir(data_dir) if f.lower().endswith('metadata.pkl')]
-    if meta_files:
-        meta = joblib.load(os.path.join(data_dir, meta_files[0]))
-        categorical_indices = meta.get('categorical_feature_indices', [])
-        categorical_categories = meta.get('categorical_feature_categories', [])
-    else:
-        categorical_indices = []
-        categorical_categories = []
+    # Aplicar codificadores a las columnas categóricas
+    for col_name, le in feature_encoders.items():
+        if col_name in df.columns:
+            col_idx = df.columns.get_loc(col_name)
+            X_raw[:, col_idx] = le.transform(X_raw[:, col_idx].astype(str))
+        else:
+            print(f"⚠️ Advertencia: columna '{col_name}' no encontrada en el dataset.")
 
+    # Escalar (si hay scaler)
     if scaler is not None:
         X = scaler.transform(X_raw)
     else:
@@ -56,37 +132,28 @@ def load_dataset_and_model(dataset_name):
         y = y_raw.astype(int)
         class_names = sorted(np.unique(y))
 
+    # Cargar árboles
     trepan_data = joblib.load(trepan_path)
     trepan_tree = trepan_data.explainer_tree
     trepan_rel_data = joblib.load(trepan_rel_path)
     trepan_rel_tree = trepan_rel_data.explainer_tree
 
+    # Obtener índices y valores reales de las columnas categóricas
+    categorical_indices = []
+    categorical_values = []
+    for col_name in feature_encoders.keys():
+        if col_name in df.columns:
+            col_idx = df.columns.get_loc(col_name)
+            categorical_indices.append(col_idx)
+            unique_vals = np.unique(X[:, col_idx])
+            categorical_values.append(unique_vals)
+
     return (X, y, mlp_model, trepan_tree, trepan_rel_tree,
-            class_names, scaler, categorical_indices, categorical_categories)
+            class_names, scaler, categorical_indices, categorical_values)
 
-def generar_contrafactual(x_orig, target_class, mlp_model, feature_intervals,
-                          categorical_indices, pop_size, n_gen):
-    evol = Evolution(
-        x=x_orig,
-        fitness_function=gower_fitness_function,
-        fitness_function_kwargs={
-            'blackbox': mlp_model,
-            'desired_class': target_class,
-            'apply_fixes': True
-        },
-        feature_intervals=feature_intervals,
-        indices_categorical_features=categorical_indices,
-        plausibility_constraints=[None] * len(x_orig),
-        evolution_type='classic',
-        population_size=pop_size,
-        n_generations=n_gen,
-        mutation_probability='inv_mutable_genotype_length',
-        num_features_mutation_strength=0.25,
-        verbose=False
-    )
-    evol.run()
-    return evol.elite
-
+# -------------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', required=True)
@@ -94,12 +161,27 @@ def main():
     parser.add_argument('--pop_size', type=int, default=500)
     parser.add_argument('--generations', type=int, default=50)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--exp_id', type=str, default='', help='Identificador de experimento (subcarpeta)')
     args = parser.parse_args()
 
     np.random.seed(args.seed)
 
     (X, y, mlp, trepan, trepan_rel, class_names,
-     scaler, cat_indices, cat_categories) = load_dataset_and_model(args.dataset)
+     scaler, cat_indices, cat_values) = load_dataset_and_model(args.dataset, args.exp_id)
+    
+    # ---- VERIFICACIÓN DEL MLP ----
+    preds = mlp.predict(X)
+    unique_pred = np.unique(preds)
+    unique_true = np.unique(y)
+    print("Distribución de clases reales:", np.unique(y, return_counts=True))
+    print("Distribución de clases predichas:", np.unique(preds, return_counts=True))
+    if len(np.unique(preds)) < 2:
+        print("⚠️ ERROR: El MLP solo predice una clase. Reentrena con más capacidad.")
+        return
+    missing_classes = set(unique_true) - set(unique_pred)
+    if missing_classes:
+        print(f"⚠️ ADVERTENCIA: El MLP no predice las clases {missing_classes}. Los CF pueden no ser válidos.")
+    # ------------------------------
 
     n_total = len(X)
     n_muestras = int(n_total * args.sample_ratio)
@@ -110,8 +192,7 @@ def main():
     for i in range(n_features):
         if i in cat_indices:
             idx_in_cat = cat_indices.index(i)
-            cat_list = cat_categories[idx_in_cat]
-            feature_intervals.append(np.array(cat_list))
+            feature_intervals.append(cat_values[idx_in_cat])
         else:
             col_min = float(X[:, i].min())
             col_max = float(X[:, i].max())
@@ -142,7 +223,9 @@ def main():
         if len(unique_classes) == 2:
             target_class = 1 - y_mlp
         else:
-            target_class = unique_classes[unique_classes != y_mlp][0]
+            candidates = [c for c in unique_classes if c != y_mlp]
+            candidates.sort(key=lambda c: abs(c - y_mlp))
+            target_class = candidates[0]
 
         cf = generar_contrafactual(x_orig, target_class, mlp, feature_intervals,
                                    cat_indices, args.pop_size, args.generations)
@@ -201,13 +284,18 @@ def main():
             }
         })
 
-    output_dir = os.path.join('experimentos', args.dataset, 'resultados')
+    # --- Guardado versionado ---
+    if args.exp_id:
+        output_dir = os.path.join('experimentos', args.dataset, args.exp_id, 'resultados')
+    else:
+        output_dir = os.path.join('experimentos', args.dataset, 'resultados')
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f'cf_results_{args.dataset}_cogs.json')
 
     final_output = {
         'execution_parameters': {
             'dataset': args.dataset,
+            'exp_id': args.exp_id,
             'sample_ratio': args.sample_ratio,
             'population_size': args.pop_size,
             'generations': args.generations,

@@ -1,33 +1,44 @@
-# Entorno virtual
-venv/
-env/
-.venv/
-
-# Archivos de Python
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
 
-# Archivos de datos (si son grandes o sensibles, pero puedes incluir los CSV pequeños)
-# *.csv   # descomenta si NO quieres subir los datasets
+# Entornos virtuales
+venv/
+env/
+ENV/
+.venv
 
-# Modelos entrenados (pueden ser pesados, pero si son pequeños puedes quitarlo)
+# Datos y resultados de experimentos (¡CRÍTICO!)
+experimentos/
+*.csv
 *.pkl
-*.pickle
-
-# Resultados (JSON, imágenes, etc.)
-resultados/
+*.joblib
 *.json
-*.png
-*.svg
 
-# Configuraciones de IDE
+# Logs y archivos temporales
+*.log
+*.tmp
+.DS_Store
+
+# IDs y configuraciones locales
+.env
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# Archivos del sistema
-Thumbs.db
-.DS_Store
+# Gráficos y figuras (si los generas)
+*.png
+*.jpg
+*.pdf
+*.svg
+
+# Ontologías (si son grandes)
+*.owl
+*.rdf

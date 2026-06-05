@@ -1,83 +1,95 @@
 #!/usr/bin/env python3
-# entrenar_mlp.py - Entrena un MLP para un dataset y guarda modelo limpio.
-# Uso: python entrenar_mlp.py --dataset iris
+# entrenar_mlp.py - Entrena MLP y guarda modelo en subcarpeta versionada.
 
 import argparse
 import os
-import sys
 import pandas as pd
-import numpy as np
 import joblib
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', required=True, help='Nombre del dataset (carpeta en experimentos/)')
-    parser.add_argument('--test_size', type=float, default=0.3)
+    parser.add_argument('--dataset', required=True)
     parser.add_argument('--hidden_layers', nargs='+', type=int, default=[100, 32])
     parser.add_argument('--max_iter', type=int, default=300)
     parser.add_argument('--random_state', type=int, default=42)
+    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--alpha', type=float, default=0.0001)
+    parser.add_argument('--exp_id', type=str, default='')
     args = parser.parse_args()
 
-    base_exp = os.path.join('experimentos', args.dataset)
-    datos_dir = os.path.join(base_exp, 'datos')
-    modelos_dir = os.path.join(base_exp, 'modelos')
+    # --- Rutas ---
+    # Datos originales (siempre desde carpeta base)
+    original_base = os.path.join('experimentos', args.dataset)
+    datos_originales = os.path.join(original_base, 'datos')
+    csv_files = [f for f in os.listdir(datos_originales) if f.endswith('.csv')]
+    data_path = os.path.join(datos_originales, csv_files[0])
+    print(f"📂 Datos desde: {data_path}")
+
+    # Subcarpeta versionada para guardar modelo
+    if args.exp_id:
+        exp_dir = os.path.join(original_base, args.exp_id)
+        modelos_dir = os.path.join(exp_dir, 'modelos')
+    else:
+        modelos_dir = os.path.join(original_base, 'modelos')
     os.makedirs(modelos_dir, exist_ok=True)
 
-    csv_files = [f for f in os.listdir(datos_dir) if f.endswith('.csv')]
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV en {datos_dir}")
-    data_path = os.path.join(datos_dir, csv_files[0])
-
+    # --- Leer datos ---
     df = pd.read_csv(data_path)
-    X_raw = df.iloc[:, :-1].values
-    y_raw = df.iloc[:, -1].values
-    feature_names = list(df.columns[:-1])
-    target_name = df.columns[-1]
+    target_col = df.columns[-1]
+    feature_cols = df.columns[:-1]
 
+    categorical_cols = df[feature_cols].select_dtypes(include=['object', 'category']).columns.tolist()
+    # Codificar categóricas
+    feature_encoders = {}
+    df_encoded = df.copy()
+    for col in categorical_cols:
+        le = LabelEncoder()
+        df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
+        feature_encoders[col] = le
+
+    # Codificar objetivo
     label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(y_raw)
+    y = label_encoder.fit_transform(df_encoded[target_col])
+    X_raw = df_encoded[feature_cols].values
 
+    # Escalar
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
+    X = scaler.fit_transform(X_raw)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=args.test_size, random_state=args.random_state, stratify=y
-    )
-
+    # --- Entrenar MLP ---
     mlp = MLPClassifier(
         hidden_layer_sizes=tuple(args.hidden_layers),
         activation='relu',
-        solver='adam',
+        solver='lbfgs',
         max_iter=args.max_iter,
         random_state=args.random_state,
-        verbose=True
+        verbose=args.verbose,
+        alpha=args.alpha
     )
-    mlp.fit(X_train, y_train)
+    mlp.fit(X, y)
+    acc = accuracy_score(y, mlp.predict(X))
+    print(f"✅ Precisión entrenamiento: {acc:.4f}")
 
-    y_pred = mlp.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    print(f"Precisión en test: {acc:.4f}")
-
-    modelo_limpio = {
+    # --- Guardar ---
+    modelo = {
         'model': mlp,
         'label_encoder': label_encoder,
-        'feature_encoders': {},
+        'feature_encoders': feature_encoders,
+        'scaler': scaler,
+        'categorical_features': categorical_cols,
         'metadata': {
-            'file_name': csv_files[0],
-            'features': feature_names,
-            'target': target_name,
+            'features': feature_cols.tolist(),
+            'target': target_col,
             'classes': label_encoder.classes_.tolist(),
-            'sample_count': len(df),
-            'scaler': scaler
+            'train_accuracy': acc
         }
     }
-    output_path = os.path.join(modelos_dir, f'mlp_{args.dataset}_limpio.pkl')
-    joblib.dump(modelo_limpio, output_path)
-    print(f"✅ Modelo guardado en {output_path}")
+    out_path = os.path.join(modelos_dir, f'mlp_{args.dataset}_limpio.pkl')
+    joblib.dump(modelo, out_path)
+    print(f"💾 Modelo guardado en {out_path}")
 
 if __name__ == '__main__':
     main()
